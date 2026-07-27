@@ -34,6 +34,12 @@ jobs:
 
       - uses: julia-actions/cache@v2
 
+      # Montage and PhysiCellOutput are registered in the BergmanLabRegistry.
+      # Add it (plus General, which must be added explicitly once any
+      # registry is added manually) so PackageCompiler can resolve them.
+      - name: Add BergmanLabRegistry
+        run: julia -e 'import Pkg; Pkg.Registry.add("General"); Pkg.Registry.add(Pkg.RegistrySpec(url="https://github.com/drbergman-lab/BergmanLabRegistry.git"))'
+
       - name: Build app with PackageCompiler
         run: julia --project=build build/create_app.jl pc_dashboard
 
