@@ -35,7 +35,7 @@ jobs:
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v3
 
       # Montage and PhysiCellOutput are registered in the BergmanLabRegistry.
       # Add it (plus General, which must be added explicitly once any
@@ -63,7 +63,7 @@ jobs:
       - uses: julia-actions/setup-julia@v3
         with:
           version: '1'
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v3
 
       - name: Add BergmanLabRegistry
         run: julia -e 'import Pkg; Pkg.Registry.add("General"); Pkg.Registry.add(Pkg.RegistrySpec(url="https://github.com/drbergman-lab/BergmanLabRegistry.git"))'

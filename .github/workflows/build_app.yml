@@ -32,7 +32,7 @@ jobs:
         with:
           version: '1.12'
 
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v3
 
       # Montage and PhysiCellOutput are registered in the BergmanLabRegistry.
       # Add it (plus General, which must be added explicitly once any
