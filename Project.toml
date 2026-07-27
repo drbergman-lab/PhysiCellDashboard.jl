@@ -1,0 +1,13 @@
+name = "PhysiCellDashboard"
+uuid = "d81fb6a0-5078-47e9-a8db-0b9e17be484b"
+authors = ["Daniel Bergman <danielrbergman@gmail.com> and contributors"]
+version = "0.1.0"
+
+[compat]
+julia = "1.12"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
