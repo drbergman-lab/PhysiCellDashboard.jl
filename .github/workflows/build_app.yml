@@ -1,0 +1,67 @@
+name: Build app
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    name: ${{ matrix.asset_name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    permissions:
+      contents: write # needed to attach assets to a release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_name: pc_dashboard-linux-x86_64
+          - os: macos-latest
+            asset_name: pc_dashboard-macos-arm64
+          - os: macos-13
+            asset_name: pc_dashboard-macos-x86_64
+          - os: windows-latest
+            asset_name: pc_dashboard-windows-x86_64
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1.12'
+
+      - uses: julia-actions/cache@v2
+
+      - name: Build app with PackageCompiler
+        run: julia --project=build build/create_app.jl pc_dashboard
+
+      - name: Archive app (tar.gz)
+        if: runner.os != 'Windows'
+        run: tar -czf ${{ matrix.asset_name }}.tar.gz pc_dashboard
+
+      - name: Archive app (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path pc_dashboard -DestinationPath ${{ matrix.asset_name }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: |
+            ${{ matrix.asset_name }}.tar.gz
+            ${{ matrix.asset_name }}.zip
+          if-no-files-found: ignore
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          for f in "${{ matrix.asset_name }}.tar.gz" "${{ matrix.asset_name }}.zip"; do
+            if [ -f "$f" ]; then
+              gh release upload "${{ github.event.release.tag_name }}" "$f" --clobber
+            fi
+          done

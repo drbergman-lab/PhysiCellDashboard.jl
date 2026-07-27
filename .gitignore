@@ -5,3 +5,5 @@
 /Manifest*.toml
 /docs/Manifest*.toml
 /docs/build/
+/build/Manifest.toml
+/build/pc_dashboard_app/
