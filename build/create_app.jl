@@ -28,6 +28,17 @@ create_app(
     app_dir;
     executables = ["pc_dashboard" => "julia_main"],
     force = true,
+    # PackageCompiler's default for x86_64 compiles 3 separate
+    # microarchitecture variants (generic/sandybridge/haswell) into one
+    # sysimage for portability, roughly tripling the LLVM codegen/link
+    # work (and peak memory) during the build — that appears to be why
+    # CI runs OOM on Linux/Windows while arm64 (which already defaults
+    # to a single "generic" target) doesn't. Forcing a single generic
+    # target everywhere trades some possible runtime speed on newer
+    # CPUs (no AVX2/etc.) for a build that fits in CI memory — a fine
+    # trade for an app that's mostly HTTP serving + Cairo rendering,
+    # not numerically-intensive code.
+    cpu_target = "generic",
 )
 
 println("Built pc_dashboard app at $app_dir")
