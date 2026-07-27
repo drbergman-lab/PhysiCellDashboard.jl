@@ -13,6 +13,8 @@ jobs:
     timeout-minutes: 360
     permissions:
       contents: write # needed to attach assets to a release
+      id-token: write # needed to mint the OIDC token for build provenance attestation
+      attestations: write # needed to publish the attestation
     strategy:
       fail-fast: false
       matrix:
@@ -21,7 +23,7 @@ jobs:
             asset_name: pc_dashboard-linux-x86_64
           - os: macos-latest
             asset_name: pc_dashboard-macos-arm64
-          - os: macos-13
+          - os: macos-26-intel
             asset_name: pc_dashboard-macos-x86_64
           - os: windows-latest
             asset_name: pc_dashboard-windows-x86_64
@@ -94,14 +96,32 @@ jobs:
           path: resource_monitor.log
           if-no-files-found: ignore
 
+      - name: Copy install.sh (macOS only)
+        if: runner.os == 'macOS'
+        run: cp build/install.sh .
+
       - name: Archive app (tar.gz)
         if: runner.os != 'Windows'
-        run: tar -czf ${{ matrix.asset_name }}.tar.gz pc_dashboard
+        run: |
+          if [ -f install.sh ]; then
+            tar -czf ${{ matrix.asset_name }}.tar.gz pc_dashboard install.sh
+          else
+            tar -czf ${{ matrix.asset_name }}.tar.gz pc_dashboard
+          fi
 
       - name: Archive app (zip)
         if: runner.os == 'Windows'
         shell: pwsh
         run: Compress-Archive -Path pc_dashboard -DestinationPath ${{ matrix.asset_name }}.zip
+
+      # Cryptographically ties this archive to the exact commit/workflow
+      # run that produced it. Anyone (including us) can verify a
+      # downloaded release asset wasn't tampered with after the fact via:
+      #   gh attestation verify <file> --repo drbergman-lab/PhysiCellDashboard.jl
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: '${{ matrix.asset_name }}.*'
 
       - uses: actions/upload-artifact@v4
         with:

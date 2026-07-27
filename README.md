@@ -20,10 +20,26 @@ No Julia installation needed to run it.
 **Install:**
 
 1. Download the archive for your platform from the Releases page and
-   extract it. You'll get a `pc_dashboard/` folder containing `bin/`,
+   extract it. You'll get a `pc_dashboard/` folder (containing `bin/`,
    `lib/`, and `share/` — the executable needs the rest of the folder
-   next to it, so don't move `bin/pc_dashboard` out on its own.
-2. Make it callable from anywhere, either:
+   next to it, so don't move `bin/pc_dashboard` out on its own), plus
+   an `install.sh` next to it on macOS only.
+2. **macOS:** run `./install.sh` from wherever you extracted to. This
+   clears Gatekeeper's quarantine flag from the whole `pc_dashboard/`
+   folder — needed because a browser download quarantines every file
+   individually, not just the top-level archive, and pc_dashboard
+   ships dozens of separate `.dylib`s (one per bundled library) that
+   Gatekeeper would otherwise block one at a time on first launch.
+   (Linux/Windows don't have this problem, so there's nothing to run
+   there.)
+
+   If you'd rather do it by hand, or `install.sh` isn't there:
+   ```bash
+   chmod -R u+w /path/to/pc_dashboard
+   xattr -dr com.apple.quarantine /path/to/pc_dashboard
+   ```
+   on the **extracted folder** — not just `pc_dashboard/bin/pc_dashboard`.
+3. Make it callable from anywhere, either:
    - add `pc_dashboard/bin` to your `PATH`, or
    - symlink just the executable into a directory already on your
      `PATH` (this is safe — the app resolves its own real location at
@@ -32,11 +48,6 @@ No Julia installation needed to run it.
      ```bash
      ln -s /path/to/pc_dashboard/bin/pc_dashboard /usr/local/bin/pc_dashboard
      ```
-3. **macOS only:** since the binary isn't notarized, Gatekeeper will
-   quarantine it on first download. Clear that once per download with:
-   ```bash
-   xattr -dr com.apple.quarantine /path/to/pc_dashboard
-   ```
 
 **Use it:**
 
