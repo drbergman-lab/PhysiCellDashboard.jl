@@ -1,5 +1,6 @@
 module PhysiCellDashboard
 
+using CairoMakie
 using Montage
 using PhysiCellOutput
 
@@ -22,7 +23,7 @@ end
 function DashboardState(output_dir::String)
     DashboardState(
         output_dir,
-        0,
+        -1,
         -1,
         true,
         joinpath(mktempdir(), "current.png")
@@ -81,6 +82,23 @@ function render_frame!(state::DashboardState, idx::Integer)
 end
 
 """
+    try_render!(state, idx)
+
+Render frame `idx`, catching and logging errors instead of
+propagating them (e.g. a snapshot file mid-write by a running
+simulation). Returns whether the render succeeded.
+"""
+function try_render!(state::DashboardState, idx::Integer)
+
+    try
+        return render_frame!(state, idx)
+    catch err
+        @warn "Could not load frame" frame=idx exception=err
+        return false
+    end
+end
+
+"""
     monitor!(state)
 
 Background task that follows a running simulation.
@@ -102,11 +120,7 @@ function monitor!(state::DashboardState)
 
             next_frame = state.current_frame + 1
 
-            try
-                render_frame!(state, next_frame)
-            catch err
-                @warn "Could not load frame" frame=next_frame exception=err
-            end
+            try_render!(state, next_frame)
         end
 
         sleep(1.0)
@@ -179,7 +193,7 @@ async function refresh() {
         s.latest_frame;
 
     document.getElementById("sim").src =
-        "/current.png";
+        "/current.png?frame=" + s.current_frame;
 }
 
 async function command(name) {
@@ -212,7 +226,7 @@ function router(state)
 
     function handler(req)
 
-        target = req.target
+        target = HTTP.URI(req.target).path
 
         if target == "/"
 
@@ -246,7 +260,10 @@ function router(state)
             return HTTP.Response(
                 200,
                 read(state.image_file);
-                headers=["Content-Type" => "image/png"]
+                headers=[
+                    "Content-Type" => "image/png",
+                    "Cache-Control" => "no-store",
+                ]
             )
         end
 
@@ -271,9 +288,9 @@ function router(state)
                     state.latest_frame
                 )
 
-                render_frame!(state, idx)
+                ok = try_render!(state, idx)
 
-                return HTTP.Response(200)
+                return HTTP.Response(ok ? 200 : 500)
             end
 
             if target == "/prev"
@@ -285,30 +302,30 @@ function router(state)
                     0
                 )
 
-                render_frame!(state, idx)
+                ok = try_render!(state, idx)
 
-                return HTTP.Response(200)
+                return HTTP.Response(ok ? 200 : 500)
             end
 
             if target == "/start"
 
                 state.playing = false
 
-                render_frame!(state, 0)
+                ok = try_render!(state, 0)
 
-                return HTTP.Response(200)
+                return HTTP.Response(ok ? 200 : 500)
             end
 
             if target == "/end"
 
                 state.playing = false
 
-                render_frame!(
+                ok = try_render!(
                     state,
                     state.latest_frame
                 )
 
-                return HTTP.Response(200)
+                return HTTP.Response(ok ? 200 : 500)
             end
         end
 
@@ -336,7 +353,7 @@ function dashboard(
 
     if latest ≥ 0
         state.latest_frame = latest
-        render_frame!(state, latest)
+        try_render!(state, latest)
     end
 
     @async monitor!(state)
