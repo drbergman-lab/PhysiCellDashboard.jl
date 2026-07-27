@@ -40,7 +40,10 @@ jobs:
       # Add it (plus General, which must be added explicitly once any
       # registry is added manually) so PackageCompiler can resolve them.
       - name: Add BergmanLabRegistry
-        run: julia -e 'import Pkg; Pkg.Registry.add("General"); Pkg.Registry.add(Pkg.RegistrySpec(url="https://github.com/drbergman-lab/BergmanLabRegistry.git"))'
+        run: >
+          julia -e 'import Pkg;
+          Pkg.Registry.add("General");
+          Pkg.Registry.add(Pkg.RegistrySpec(url="https://github.com/drbergman-lab/BergmanLabRegistry.git"))'
 
       # The CairoMakie/Makie stack is heavy to compile into a sysimage; free
       # up disk headroom on Linux by dropping preinstalled toolchains this
@@ -48,53 +51,83 @@ jobs:
       - name: Free disk space
         if: runner.os == 'Linux'
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY" || true
+
           df -h .
 
       # Diagnostic only, for tracking down the earlier "signal 15:
-      # Terminated" / "operation was canceled" failures on Linux, which
-      # look like the runner ran low on memory or disk mid-compile.
-      # Logs a snapshot every 30s; uploaded as an artifact regardless of
-      # whether the build succeeds. Safe to remove once that's diagnosed.
-      - name: Start resource monitor (Linux/macOS)
-        if: runner.os != 'Windows'
+      # Terminated" / "operation was canceled" failures on Linux.
+      # The monitor prints directly into the build log every 10s so the
+      # final snapshots survive even if the runner kills the job.
+      - name: Build app with PackageCompiler (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
         run: |
           (
             while true; do
-              echo "=== $(date -u +%FT%TZ) ==="
-              if [ "$(uname)" = "Darwin" ]; then vm_stat; else free -h; fi
+              echo
+              echo "=================================================="
+              echo "$(date -u +%FT%TZ)"
+
+              echo "--- free ---"
+              free -h || true
+
+              echo "--- meminfo ---"
+              grep -E 'Mem|Swap' /proc/meminfo || true
+
+              echo "--- cgroup ---"
+              for f in \
+                /sys/fs/cgroup/memory.current \
+                /sys/fs/cgroup/memory.max \
+                /sys/fs/cgroup/memory.peak \
+                /sys/fs/cgroup/memory/memory.usage_in_bytes \
+                /sys/fs/cgroup/memory/memory.limit_in_bytes
+              do
+                [ -f "$f" ] && {
+                  echo "$f"
+                  cat "$f"
+                }
+              done
+
+              echo "--- disk ---"
               df -h .
-              sleep 30
+
+              echo "--- top RSS ---"
+              ps -eo pid,rss,comm --sort=-rss | head -20
+
+              echo "--- julia processes ---"
+              ps -o pid,ppid,%mem,%cpu,rss,vsz,etime,args -C julia || true
+
+              echo "--- linker processes ---"
+              ps -o pid,ppid,%mem,%cpu,rss,vsz,etime,args -C ld -C ld.lld -C lld || true
+
+              sleep 10
             done
-          ) >> resource_monitor.log 2>&1 &
+          ) &
+          MONITOR_PID=$!
 
-      - name: Start resource monitor (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # Start-Job wouldn't survive past this step, since each GH Actions
-          # step spawns a fresh pwsh.exe and jobs are tied to that session.
-          # Start-Process spawns a genuinely independent process instead.
-          @'
-          while ($true) {
-            Add-Content resource_monitor.log "=== $(Get-Date -AsUTC -Format o) ==="
-            Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory,TotalVisibleMemorySize | Out-File -Append resource_monitor.log
-            Get-PSDrive C | Out-File -Append resource_monitor.log
-            Start-Sleep -Seconds 30
-          }
-          '@ | Set-Content monitor.ps1
-          Start-Process pwsh -ArgumentList '-NoProfile','-File','monitor.ps1' -WindowStyle Hidden
+          julia --project=build build/create_app.jl pc_dashboard
+          STATUS=$?
 
-      - name: Build app with PackageCompiler
+          kill "$MONITOR_PID" 2>/dev/null || true
+          wait "$MONITOR_PID" 2>/dev/null || true
+
+          exit $STATUS
+
+      - name: Build app with PackageCompiler (macOS)
+        if: runner.os == 'macOS'
         run: julia --project=build build/create_app.jl pc_dashboard
 
-      - name: Upload resource monitor log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.asset_name }}-resource-monitor
-          path: resource_monitor.log
-          if-no-files-found: ignore
+      - name: Build app with PackageCompiler (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: julia --project=build build/create_app.jl pc_dashboard
 
       - name: Copy install.sh (macOS only)
         if: runner.os == 'macOS'
@@ -112,7 +145,8 @@ jobs:
       - name: Archive app (zip)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path pc_dashboard -DestinationPath ${{ matrix.asset_name }}.zip
+        run: |
+          Compress-Archive -Path pc_dashboard -DestinationPath ${{ matrix.asset_name }}.zip
 
       # Cryptographically ties this archive to the exact commit/workflow
       # run that produced it. Anyone (including us) can verify a
