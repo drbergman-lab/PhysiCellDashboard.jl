@@ -14,9 +14,46 @@ const DEFAULT_WIDTH = 700
 const DEFAULT_HEIGHT = 700
 const DEFAULT_FPS = 2.0
 
-# Guard rails for values coming in over HTTP.
+# Guard rails, enforced for every entry point: the Julia API, the CLI,
+# and the HTTP endpoints.
 const SIZE_LIMITS = (100, 4000)
 const FPS_LIMITS = (0.1, 60.0)
+
+"""
+    check_size(width, height)
+
+Throw an `ArgumentError` unless both dimensions are within
+`SIZE_LIMITS`.
+"""
+function check_size(width::Integer, height::Integer)
+
+    lo, hi = SIZE_LIMITS
+
+    (lo ≤ width ≤ hi && lo ≤ height ≤ hi) || throw(ArgumentError(
+        "size must be within $(lo)-$(hi) px (got $(width)x$(height))"
+    ))
+
+    return nothing
+end
+
+"""
+    check_fps(fps)
+
+Throw an `ArgumentError` unless `fps` is within `FPS_LIMITS`. The lower
+bound matters: the monitor loop divides by `fps`, so zero would stall
+playback outright and a negative value would advance frames as fast as
+they can be rendered.
+"""
+function check_fps(fps::Real)
+
+    lo, hi = FPS_LIMITS
+
+    (isfinite(fps) && lo ≤ fps ≤ hi) || throw(ArgumentError(
+        "fps must be within $(lo)-$(hi) (got $(fps))"
+    ))
+
+    return nothing
+end
 
 mutable struct DashboardState
     output_dir::String
@@ -48,6 +85,11 @@ function DashboardState(
     height::Integer = DEFAULT_HEIGHT,
     fps::Real = DEFAULT_FPS,
 )
+    # Every entry point ends up here, so validating once covers the
+    # Julia API and the CLI as well as HTTP.
+    check_size(width, height)
+    check_fps(fps)
+
     DashboardState(
         output_dir,
         -1,
@@ -56,9 +98,9 @@ function DashboardState(
         mktempdir(),
         true,
         nothing,
-        width,
-        height,
-        fps
+        Int(width),
+        Int(height),
+        Float64(fps)
     )
 end
 
@@ -88,20 +130,31 @@ end
 
 """
     frame_path(state, idx)
+    frame_path(cache_dir, idx, width, height)
 
-Path to the cached PNG for snapshot `idx` at the current render size,
-whether or not it has been rendered yet.
+Path to the cached PNG for snapshot `idx`, whether or not it has been
+rendered yet. The two-argument form uses the state's current render
+size; the explicit form is for callers that must pin the size (see
+[`render_frame!`](@ref)).
 
 The size is part of the filename so that changing it doesn't serve
 stale PNGs from the old size — and so switching back to a size you've
 already viewed is still an instant cache hit.
 """
-function frame_path(state::DashboardState, idx::Integer)
+function frame_path(
+    cache_dir::AbstractString,
+    idx::Integer,
+    width::Integer,
+    height::Integer,
+)
     return joinpath(
-        state.cache_dir,
-        "frame$(lpad(idx, 8, '0'))_$(state.width)x$(state.height).png",
+        cache_dir,
+        "frame$(lpad(idx, 8, '0'))_$(width)x$(height).png",
     )
 end
+
+frame_path(state::DashboardState, idx::Integer) =
+    frame_path(state.cache_dir, idx, state.width, state.height)
 
 """
     latest_snapshot_index(folder)
@@ -134,7 +187,14 @@ cached one if this frame was already rendered this session.
 """
 function render_frame!(state::DashboardState, idx::Integer)
 
-    path = frame_path(state, idx)
+    # Pin the size for the whole render. Loading the snapshot and
+    # rendering both yield, so a concurrent `/size` request could
+    # otherwise change these between naming the file and drawing it —
+    # writing a PNG whose filename claims one size and whose pixels are
+    # another, which poisons the cache for both sizes.
+    width, height = state.width, state.height
+
+    path = frame_path(state.cache_dir, idx, width, height)
 
     if !isfile(path)
 
@@ -158,7 +218,7 @@ function render_frame!(state::DashboardState, idx::Integer)
         Base.disable_sigint() do
             Montage.tableau(
                 snap;
-                size = (state.width, state.height),
+                size = (width, height),
                 output = path,
                 overwrite = true,
             )
@@ -504,10 +564,13 @@ function router(state)
                 (w === nothing || h === nothing) &&
                     return HTTP.Response(400, "size needs integer width and height")
 
-                lo, hi = SIZE_LIMITS
-
-                (lo ≤ w ≤ hi && lo ≤ h ≤ hi) ||
-                    return HTTP.Response(400, "size must be within $(lo)-$(hi) px")
+                # Same bounds as the Julia API and CLI, checked in one place.
+                try
+                    check_size(w, h)
+                catch err
+                    err isa ArgumentError || rethrow()
+                    return HTTP.Response(400, err.msg)
+                end
 
                 state.width = w
                 state.height = h
@@ -529,10 +592,12 @@ function router(state)
                 v === nothing &&
                     return HTTP.Response(400, "fps needs a number")
 
-                lo, hi = FPS_LIMITS
-
-                lo ≤ v ≤ hi ||
-                    return HTTP.Response(400, "fps must be within $(lo)-$(hi)")
+                try
+                    check_fps(v)
+                catch err
+                    err isa ArgumentError || rethrow()
+                    return HTTP.Response(400, err.msg)
+                end
 
                 state.fps = v
 
@@ -816,10 +881,20 @@ function dashboard(
     sim_out = Pipe()
     sim_err = Pipe()
 
-    proc = run(
-        pipeline(cmd; stdout = sim_out, stderr = sim_err);
-        wait = false,
-    )
+    # Spawning can fail outright (a bad path, a non-executable file), and
+    # at that point the log files are already open but `teardown!` below
+    # isn't registered yet — so close them here rather than leaking the
+    # handles out of a failed call.
+    proc = try
+        run(
+            pipeline(cmd; stdout = sim_out, stderr = sim_err);
+            wait = false,
+        )
+    catch
+        close(out_io)
+        close(err_io)
+        rethrow()
+    end
 
     # Close the write ends in this process so EOF is seen when the
     # simulation exits.
