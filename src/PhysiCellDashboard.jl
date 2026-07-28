@@ -19,6 +19,12 @@ mutable struct DashboardState
     playing::Bool
 
     cache_dir::String
+
+    running::Bool
+
+    # Set once serving starts, so a shutdown requested from the monitor
+    # task can unblock the main task's `wait(server)`.
+    server::Union{Nothing,HTTP.Server}
 end
 
 function DashboardState(output_dir::String)
@@ -27,8 +33,34 @@ function DashboardState(output_dir::String)
         -1,
         -1,
         true,
-        mktempdir()
+        mktempdir(),
+        true,
+        nothing
     )
+end
+
+"""
+    request_shutdown!(state)
+
+Ask the dashboard to stop: end the monitor loop and close the server,
+which unblocks whichever task is waiting on it. Safe to call from any
+task, and safe to call more than once.
+"""
+function request_shutdown!(state::DashboardState)
+
+    state.running = false
+
+    server = state.server
+
+    if server !== nothing && isopen(server)
+        try
+            close(server)
+        catch
+            # Already closing/closed — nothing to do.
+        end
+    end
+
+    return nothing
 end
 
 """
@@ -86,11 +118,20 @@ function render_frame!(state::DashboardState, idx::Integer)
 
         snap === missing && return false
 
-        Montage.tableau(
-            snap;
-            output = path,
-            overwrite = true,
-        )
+        # The Makie/FileIO/Cairo stack is not interrupt-safe: a Ctrl-C
+        # landing inside `save` leaves FileIO trying fallback backends
+        # that a compiled app doesn't ship, burying the real cause under
+        # a wall of "Package ImageMagick ... is not installed" errors.
+        # Defer the interrupt until the frame is done instead — it then
+        # arrives at a safepoint we handle cleanly (usually the monitor
+        # loop's `sleep`).
+        Base.disable_sigint() do
+            Montage.tableau(
+                snap;
+                output = path,
+                overwrite = true,
+            )
+        end
     end
 
     state.current_frame = idx
@@ -104,12 +145,16 @@ end
 Render frame `idx`, catching and logging errors instead of
 propagating them (e.g. a snapshot file mid-write by a running
 simulation). Returns whether the render succeeded.
+
+`InterruptException` is deliberately *not* swallowed — otherwise Ctrl-C
+gets absorbed here and the dashboard keeps running.
 """
 function try_render!(state::DashboardState, idx::Integer)
 
     try
         return render_frame!(state, idx)
     catch err
+        err isa InterruptException && rethrow()
         @warn "Could not load frame" frame=idx exception=err
         return false
     end
@@ -121,27 +166,38 @@ end
 Background task that follows a running simulation.
 
 Version 1 uses polling.
+
+Ctrl-C is frequently delivered to this task rather than the main one
+(it's the task doing the work), so an `InterruptException` here shuts the
+whole dashboard down instead of just ending this loop.
 """
 function monitor!(state::DashboardState)
 
-    while true
+    try
+        while state.running
 
-        latest = latest_snapshot_index(state.output_dir)
+            latest = latest_snapshot_index(state.output_dir)
 
-        if latest > state.latest_frame
-            state.latest_frame = latest
+            if latest > state.latest_frame
+                state.latest_frame = latest
+            end
+
+            if state.playing &&
+               state.current_frame < state.latest_frame
+
+                next_frame = state.current_frame + 1
+
+                try_render!(state, next_frame)
+            end
+
+            sleep(1.0)
         end
-
-        if state.playing &&
-           state.current_frame < state.latest_frame
-
-            next_frame = state.current_frame + 1
-
-            try_render!(state, next_frame)
-        end
-
-        sleep(1.0)
+    catch err
+        err isa InterruptException || rethrow()
+        request_shutdown!(state)
     end
+
+    return nothing
 end
 
 function html_page()
@@ -397,12 +453,11 @@ function dashboard(
 
     latest = latest_snapshot_index(folder)
 
-    if latest ≥ 0
-        state.latest_frame = latest
-        try_render!(state, latest)
-    end
-
-    @async monitor!(state)
+    # Serve before rendering anything: the first frame is the slowest
+    # (Makie's first render), and there's no reason to make the page wait
+    # on it — it polls for the image anyway.
+    server = HTTP.serve!(router(state), host, port)
+    state.server = server
 
     url = "http://$(host):$(port)"
 
@@ -410,22 +465,25 @@ function dashboard(
 
     open_browser && open_in_browser(url)
 
-    HTTP.serve(
-        host,
-        port,
-    ) do req
-
-        try
-            router(state)(req)
-        catch err
-
-            @show err
-            showerror(stdout, err)
-            println()
-
-            rethrow(err)
+    try
+        if latest ≥ 0
+            state.latest_frame = latest
+            try_render!(state, latest)
         end
+
+        @async monitor!(state)
+
+        wait(server)
+    catch err
+        # Ctrl-C: shut down quietly instead of dumping a stack trace.
+        err isa InterruptException || rethrow()
+    finally
+        request_shutdown!(state)
     end
+
+    @info "Dashboard stopped"
+
+    return nothing
 end
 
 const DEFAULT_CONFIG_PATH = joinpath("config", "PhysiCell_settings.xml")
@@ -494,7 +552,32 @@ function resolve_output_dir(cmd::Cmd)
 end
 
 """
-    dashboard(cmd::Cmd; output_dir=nothing, host="127.0.0.1", port=8080, open_browser=true)
+    tee_lines!(pipe, io, echo_to)
+
+Forward each line read from `pipe` into `io`, flushing as it goes so the
+file can be `tail -f`'d. When `echo_to` isn't `nothing`, the line is
+written there too. Runs asynchronously.
+"""
+function tee_lines!(pipe, io::IO, echo_to::Union{Nothing,IO})
+
+    @async begin
+        try
+            for line in eachline(pipe)
+                println(io, line)
+                flush(io)
+                echo_to === nothing || println(echo_to, line)
+            end
+        catch
+            # The pipe being torn down on shutdown is expected.
+        end
+    end
+
+    return nothing
+end
+
+"""
+    dashboard(cmd::Cmd; output_dir=nothing, host="127.0.0.1", port=8080,
+              open_browser=true, verbose=false)
 
 Launch a PhysiCell simulation via `cmd` and serve a live dashboard
 of its output as it's produced. The simulation process is
@@ -502,6 +585,12 @@ terminated when the dashboard exits (e.g. via Ctrl-C).
 
 If `output_dir` isn't given, it's resolved from `cmd` — see
 [`resolve_output_dir`](@ref).
+
+The simulation's output is always captured inside the output folder,
+with its streams kept separate: stdout to `output.log` and stderr to
+`output.err`. Neither is echoed to the console by default, since
+PhysiCell is chatty enough to bury the dashboard's own messages; pass
+`verbose=true` to see them live as well.
 """
 function dashboard(
     cmd::Cmd;
@@ -509,15 +598,68 @@ function dashboard(
     host = "127.0.0.1",
     port = 8080,
     open_browser::Bool = true,
+    verbose::Bool = false,
 )
 
     resolved_output_dir = output_dir === nothing ?
         resolve_output_dir(cmd) :
         output_dir
 
-    @info "Launching simulation" cmd output_dir=resolved_output_dir
+    # PhysiCell creates this itself, but both the log files below and the
+    # monitor loop's `readdir` need it to exist right away.
+    mkpath(resolved_output_dir)
 
-    proc = run(cmd; wait = false)
+    out_path = joinpath(resolved_output_dir, "output.log")
+    err_path = joinpath(resolved_output_dir, "output.err")
+
+    @info "Launching simulation" cmd output_dir=resolved_output_dir stdout=out_path stderr=err_path
+
+    out_io = open(out_path, "w")
+    err_io = open(err_path, "w")
+
+    sim_out = Pipe()
+    sim_err = Pipe()
+
+    proc = run(
+        pipeline(cmd; stdout = sim_out, stderr = sim_err);
+        wait = false,
+    )
+
+    # Close the write ends in this process so EOF is seen when the
+    # simulation exits.
+    close(sim_out.in)
+    close(sim_err.in)
+
+    tee_lines!(sim_out, out_io, verbose ? stdout : nothing)
+    tee_lines!(sim_err, err_io, verbose ? stderr : nothing)
+
+    # In the compiled app, Ctrl-C exits the process outright rather than
+    # raising a catchable exception (see `julia_main`), so the `finally`
+    # below never runs on that path. Registering the same teardown as an
+    # `atexit` hook is what actually guarantees the simulation isn't left
+    # running. Idempotent, since both paths can fire.
+    torn_down = Ref(false)
+
+    function teardown!()
+
+        torn_down[] && return nothing
+        torn_down[] = true
+
+        try
+            if process_running(proc)
+                kill(proc)
+            end
+
+            close(out_io)
+            close(err_io)
+        catch
+            # Never let teardown itself become the error being reported.
+        end
+
+        return nothing
+    end
+
+    atexit(teardown!)
 
     try
         dashboard(
@@ -527,15 +669,12 @@ function dashboard(
             open_browser = open_browser,
         )
     finally
-        if process_running(proc)
-            @info "Stopping simulation"
-            kill(proc)
-        end
+        teardown!()
     end
 end
 
 const CLI_USAGE = """
-Usage: pc_dashboard [-o DIR] [-p PORT] [--host HOST] [--no-browser] [-- CMD...]
+Usage: pc_dashboard [-o DIR] [-p PORT] [--host HOST] [--no-browser] [-v] [-- CMD...]
 
   -o, --output-dir DIR   PhysiCell output folder to watch. If omitted
                          and a CMD is given, this is resolved from
@@ -545,6 +684,11 @@ Usage: pc_dashboard [-o DIR] [-p PORT] [--host HOST] [--no-browser] [-- CMD...]
   -p, --port PORT        Port to serve the dashboard on (default: 8080)
       --host HOST        Host to bind to (default: "127.0.0.1")
       --no-browser       Don't open a browser window automatically
+  -v, --verbose          Echo the simulation's output to the console. It
+                         is always captured either way, to output.log
+                         (stdout) and output.err (stderr) in the output
+                         folder; this just also shows it live, which is
+                         noisy enough to bury pc_dashboard's own messages.
   -h, --help             Show this message
 
 If CMD is given after `--`, it is launched as the PhysiCell
@@ -570,6 +714,7 @@ function run_cli(args::Vector{String})
     host = "127.0.0.1"
     port = 8080
     open_browser = true
+    verbose = false
 
     sim_cmd_args = String[]
     reading_cmd = false
@@ -594,6 +739,8 @@ function run_cli(args::Vector{String})
             host = args[i]
         elseif a == "--no-browser"
             open_browser = false
+        elseif a in ("-v", "--verbose")
+            verbose = true
         elseif a == "--"
             reading_cmd = true
         else
@@ -608,9 +755,10 @@ function run_cli(args::Vector{String})
     end
 
     if isempty(sim_cmd_args)
+        verbose && @warn "--verbose only applies to a simulation launched by pc_dashboard; ignoring it since no command was given"
         dashboard(something(output_dir, "output"); host, port, open_browser)
     else
-        dashboard(Cmd(sim_cmd_args); output_dir, host, port, open_browser)
+        dashboard(Cmd(sim_cmd_args); output_dir, host, port, open_browser, verbose)
     end
 
     return
@@ -624,9 +772,35 @@ Entry point for the compiled `pc_dashboard` executable (see
 Reads `ARGS`; run `pc_dashboard --help` for usage.
 """
 function julia_main()::Cint
+
+    # A compiled app's entry point bypasses Julia's usual script-mode
+    # driver, so this has to be set explicitly. Neither setting is
+    # clean; `false` is the deliberate choice here.
+    #
+    # `false` raises SIGINT as an InterruptException in whichever task
+    # happens to be running — a lottery between the monitor task, the
+    # log-forwarding tasks, and HTTP.jl's internal per-connection tasks.
+    # When it lands in one of ours we shut down quietly; when it lands
+    # in HTTP.jl's (more likely the more the page is actually being
+    # polled) it can give "fatal: error thrown and no exception handler
+    # available" and even a segfault on the way out.
+    #
+    # `true` would be deterministic, but Julia unconditionally prints
+    # the signal, a native backtrace, and an allocation summary on that
+    # path (`jl_exit_thread0_cb` → `jl_critical_error`), so *every*
+    # Ctrl-C is loud. We'd rather be quiet most of the time and
+    # occasionally loud than loud always.
+    #
+    # Either way the simulation dies: via the `finally` when the
+    # interrupt is catchable, via the `atexit` hook in
+    # `dashboard(cmd::Cmd)` when it isn't, and via the foreground
+    # process group when Ctrl-C is pressed in a terminal.
+    Base.exit_on_sigint(false)
+
     try
         run_cli(ARGS)
     catch err
+        err isa InterruptException && return 0
         Base.invokelatest(Base.display_error, Base.current_exceptions())
         return 1
     end
