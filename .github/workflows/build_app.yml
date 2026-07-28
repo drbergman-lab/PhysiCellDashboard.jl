@@ -19,8 +19,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            asset_name: pc_dashboard-linux-x86_64
+          # Linux is intentionally not built here: PackageCompiler's
+          # sysimage-link step gets killed by something outside Julia's
+          # control (GitHub's own Linux-runner resource monitoring, near as
+          # we can tell — see TODO.md) on every standard-runner attempt, a
+          # fix that resolved the equivalent failure on Windows had no
+          # effect on Linux. Linux users build their own — see the
+          # "Building the app yourself" section in README.md.
           - os: macos-latest
             asset_name: pc_dashboard-macos-arm64
           - os: macos-26-intel
@@ -45,88 +50,7 @@ jobs:
           Pkg.Registry.add("General");
           Pkg.Registry.add(Pkg.RegistrySpec(url="https://github.com/drbergman-lab/BergmanLabRegistry.git"))'
 
-      # The CairoMakie/Makie stack is heavy to compile into a sysimage; free
-      # up disk headroom on Linux by dropping preinstalled toolchains this
-      # workflow never uses (Android SDK, .NET, GHC, ...).
-      - name: Free disk space
-        if: runner.os == 'Linux'
-        run: |
-          sudo rm -rf \
-            /usr/share/dotnet \
-            /usr/local/lib/android \
-            /opt/ghc \
-            /usr/local/.ghcup \
-            /usr/local/share/boost \
-            "$AGENT_TOOLSDIRECTORY" || true
-
-          df -h .
-
-      # Diagnostic only, for tracking down the earlier "signal 15:
-      # Terminated" / "operation was canceled" failures on Linux.
-      # The monitor prints directly into the build log every 10s so the
-      # final snapshots survive even if the runner kills the job.
-      - name: Build app with PackageCompiler (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          (
-            while true; do
-              echo
-              echo "=================================================="
-              echo "$(date -u +%FT%TZ)"
-
-              echo "--- free ---"
-              free -h || true
-
-              echo "--- meminfo ---"
-              grep -E 'Mem|Swap' /proc/meminfo || true
-
-              echo "--- cgroup ---"
-              for f in \
-                /sys/fs/cgroup/memory.current \
-                /sys/fs/cgroup/memory.max \
-                /sys/fs/cgroup/memory.peak \
-                /sys/fs/cgroup/memory/memory.usage_in_bytes \
-                /sys/fs/cgroup/memory/memory.limit_in_bytes
-              do
-                [ -f "$f" ] && {
-                  echo "$f"
-                  cat "$f"
-                }
-              done
-
-              echo "--- disk ---"
-              df -h .
-
-              echo "--- top RSS ---"
-              ps -eo pid,rss,comm --sort=-rss | head -20
-
-              echo "--- julia processes ---"
-              ps -o pid,ppid,%mem,%cpu,rss,vsz,etime,args -C julia || true
-
-              echo "--- linker processes ---"
-              ps -o pid,ppid,%mem,%cpu,rss,vsz,etime,args -C ld -C ld.lld -C lld || true
-
-              sleep 10
-            done
-          ) &
-          MONITOR_PID=$!
-
-          julia --project=build build/create_app.jl pc_dashboard
-          STATUS=$?
-
-          kill "$MONITOR_PID" 2>/dev/null || true
-          wait "$MONITOR_PID" 2>/dev/null || true
-
-          exit $STATUS
-
-      - name: Build app with PackageCompiler (macOS)
-        if: runner.os == 'macOS'
-        run: julia --project=build build/create_app.jl pc_dashboard
-
-      - name: Build app with PackageCompiler (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
+      - name: Build app with PackageCompiler
         run: julia --project=build build/create_app.jl pc_dashboard
 
       - name: Copy install.sh (macOS only)
@@ -134,13 +58,8 @@ jobs:
         run: cp build/install.sh .
 
       - name: Archive app (tar.gz)
-        if: runner.os != 'Windows'
-        run: |
-          if [ -f install.sh ]; then
-            tar -czf ${{ matrix.asset_name }}.tar.gz pc_dashboard install.sh
-          else
-            tar -czf ${{ matrix.asset_name }}.tar.gz pc_dashboard
-          fi
+        if: runner.os == 'macOS'
+        run: tar -czf ${{ matrix.asset_name }}.tar.gz pc_dashboard install.sh
 
       - name: Archive app (zip)
         if: runner.os == 'Windows'

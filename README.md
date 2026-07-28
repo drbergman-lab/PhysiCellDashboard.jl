@@ -13,9 +13,15 @@ snapshot as it's written, with play/pause/step controls.
 
 Every [GitHub Release](https://github.com/drbergman-lab/PhysiCellDashboard.jl/releases)
 has a standalone `pc_dashboard` binary attached for macOS (Apple Silicon
-and Intel), Linux, and Windows — built by
+and Intel) and Windows — built by
 [build_app.yml](.github/workflows/build_app.yml) via PackageCompiler.
 No Julia installation needed to run it.
+
+**Linux:** no prebuilt binary is provided — PackageCompiler's build requires more RAM
+ than is available on GitHub's standard Linux runners. Build it yourself instead; see
+"Building the app yourself" below. That does mean installing Julia first,
+but the build itself is otherwise the same one-line command everyone else's
+binary comes from.
 
 **Install:**
 
@@ -30,8 +36,7 @@ No Julia installation needed to run it.
    individually, not just the top-level archive, and pc_dashboard
    ships dozens of separate `.dylib`s (one per bundled library) that
    Gatekeeper would otherwise block one at a time on first launch.
-   (Linux/Windows don't have this problem, so there's nothing to run
-   there.)
+   (Windows doesn't have this problem, so there's nothing to run there.)
 
    If you'd rather do it by hand, or `install.sh` isn't there:
    ```bash
@@ -76,10 +81,11 @@ dashboard(`./project ./config/PhysiCell_settings.xml`)
 
 ## Building the app yourself
 
+From the root of this repo (downloaded or cloned), run:
+
 ```bash
 julia --project=build build/create_app.jl
 ```
 
 Produces `build/pc_dashboard_app/`. Expect this to take several
-minutes and produce an app directory in the hundreds-of-MB range —
-see [TODO.md](TODO.md) for a planned path to shrinking that.
+minutes and produce an app directory in the hundreds-of-MB range.
