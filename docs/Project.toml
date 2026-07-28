@@ -1,3 +1,6 @@
 [deps]
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 PhysiCellDashboard = "d81fb6a0-5078-47e9-a8db-0b9e17be484b"
+
+[compat]
+Documenter = "1.17.0"
