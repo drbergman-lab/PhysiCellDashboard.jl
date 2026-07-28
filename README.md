@@ -25,18 +25,35 @@ binary comes from.
 
 **Install:**
 
-1. Download the archive for your platform from the Releases page and
-   extract it. You'll get a `pc_dashboard/` folder (containing `bin/`,
+1. Get the archive for your platform, either:
+   - **with the [GitHub CLI](https://cli.github.com/)** (recommended,
+     especially on macOS — see step 2):
+     ```bash
+     gh release download --repo drbergman-lab/PhysiCellDashboard.jl \
+       --pattern "pc_dashboard-macos-arm64.tar.gz"
+     ```
+     (swap the `--pattern` for `pc_dashboard-macos-x86_64.tar.gz` or
+     `pc_dashboard-windows-x86_64.zip` as needed; with no tag given,
+     this grabs the latest release), or
+   - by downloading it from the
+     [Releases page](https://github.com/drbergman-lab/PhysiCellDashboard.jl/releases)
+     in a browser.
+
+   Extract it. You'll get a `pc_dashboard/` folder (containing `bin/`,
    `lib/`, and `share/` — the executable needs the rest of the folder
    next to it, so don't move `bin/pc_dashboard` out on its own), plus
    an `install.sh` next to it on macOS only.
-2. **macOS:** run `./install.sh` from wherever you extracted to. This
-   clears Gatekeeper's quarantine flag from the whole `pc_dashboard/`
-   folder — needed because a browser download quarantines every file
-   individually, not just the top-level archive, and pc_dashboard
-   ships dozens of separate `.dylib`s (one per bundled library) that
-   Gatekeeper would otherwise block one at a time on first launch.
-   (Windows doesn't have this problem, so there's nothing to run there.)
+2. **macOS:** only needed if you downloaded via a browser — `gh
+   release download` never triggers this at all, since only
+   browser-mediated downloads get flagged in the first place. If you
+   did use a browser: run `./install.sh` from wherever you extracted
+   to. This clears Gatekeeper's quarantine flag from the whole
+   `pc_dashboard/` folder — needed because a browser download
+   quarantines every file individually, not just the top-level
+   archive, and pc_dashboard ships dozens of separate `.dylib`s (one
+   per bundled library) that Gatekeeper would otherwise block one at a
+   time on first launch. (Windows doesn't have this problem either
+   way.)
 
    If you'd rather do it by hand, or `install.sh` isn't there:
    ```bash
@@ -63,9 +80,30 @@ pc_dashboard -- ./project ./config/PhysiCell_settings.xml
 # Just watch an existing/running output folder:
 pc_dashboard -o output
 
+# Smaller tableau, faster playback:
+pc_dashboard --size 500x500 --fps 4 -- ./project ./config/PhysiCell_settings.xml
+
 # Full usage:
 pc_dashboard --help
 ```
+
+## Controls
+
+The page has standard media controls — `⏮ ❮ ▶/⏸ ❯ ⏭` — for first
+frame, previous, play/pause, next, and latest frame. All of them have
+keyboard shortcuts:
+
+| Key | Action |
+| --- | --- |
+| <kbd>Space</kbd> | Play/pause |
+| <kbd>←</kbd> / <kbd>→</kbd> | Previous / next frame |
+| <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>←</kbd> | First frame |
+| <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>→</kbd> | Latest frame |
+
+The rendered tableau size and the playback rate can both be changed
+from the page while the dashboard is running, or set up front with
+`--size WxH` / `--fps N`. Rendered frames are cached per size, so
+switching back to a size you've already viewed is instant.
 
 ## From Julia
 
@@ -77,6 +115,9 @@ dashboard("output")
 
 # Or launch the simulation yourself:
 dashboard(`./project ./config/PhysiCell_settings.xml`)
+
+# Same options as the CLI:
+dashboard("output"; width = 500, height = 500, fps = 4)
 ```
 
 ## Building the app yourself
