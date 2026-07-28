@@ -80,9 +80,30 @@ pc_dashboard -- ./project ./config/PhysiCell_settings.xml
 # Just watch an existing/running output folder:
 pc_dashboard -o output
 
+# Smaller tableau, faster playback:
+pc_dashboard --size 500x500 --fps 4 -- ./project ./config/PhysiCell_settings.xml
+
 # Full usage:
 pc_dashboard --help
 ```
+
+## Controls
+
+The page has standard media controls — `⏮ ❮ ▶/⏸ ❯ ⏭` — for first
+frame, previous, play/pause, next, and latest frame. All of them have
+keyboard shortcuts:
+
+| Key | Action |
+| --- | --- |
+| <kbd>Space</kbd> | Play/pause |
+| <kbd>←</kbd> / <kbd>→</kbd> | Previous / next frame |
+| <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>←</kbd> | First frame |
+| <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>→</kbd> | Latest frame |
+
+The rendered tableau size and the playback rate can both be changed
+from the page while the dashboard is running, or set up front with
+`--size WxH` / `--fps N`. Rendered frames are cached per size, so
+switching back to a size you've already viewed is instant.
 
 ## From Julia
 
@@ -94,6 +115,9 @@ dashboard("output")
 
 # Or launch the simulation yourself:
 dashboard(`./project ./config/PhysiCell_settings.xml`)
+
+# Same options as the CLI:
+dashboard("output"; width = 500, height = 500, fps = 4)
 ```
 
 ## Building the app yourself

@@ -10,6 +10,14 @@ using LightXML
 
 export dashboard
 
+const DEFAULT_WIDTH = 700
+const DEFAULT_HEIGHT = 700
+const DEFAULT_FPS = 2.0
+
+# Guard rails for values coming in over HTTP.
+const SIZE_LIMITS = (100, 4000)
+const FPS_LIMITS = (0.1, 60.0)
+
 mutable struct DashboardState
     output_dir::String
 
@@ -25,9 +33,21 @@ mutable struct DashboardState
     # Set once serving starts, so a shutdown requested from the monitor
     # task can unblock the main task's `wait(server)`.
     server::Union{Nothing,HTTP.Server}
+
+    # Rendered tableau dimensions, in pixels. Adjustable while running.
+    width::Int
+    height::Int
+
+    # Playback rate, in frames per second.
+    fps::Float64
 end
 
-function DashboardState(output_dir::String)
+function DashboardState(
+    output_dir::String;
+    width::Integer = DEFAULT_WIDTH,
+    height::Integer = DEFAULT_HEIGHT,
+    fps::Real = DEFAULT_FPS,
+)
     DashboardState(
         output_dir,
         -1,
@@ -35,7 +55,10 @@ function DashboardState(output_dir::String)
         true,
         mktempdir(),
         true,
-        nothing
+        nothing,
+        width,
+        height,
+        fps
     )
 end
 
@@ -66,11 +89,18 @@ end
 """
     frame_path(state, idx)
 
-Path to the cached PNG for snapshot `idx`, whether or not it
-has been rendered yet.
+Path to the cached PNG for snapshot `idx` at the current render size,
+whether or not it has been rendered yet.
+
+The size is part of the filename so that changing it doesn't serve
+stale PNGs from the old size — and so switching back to a size you've
+already viewed is still an instant cache hit.
 """
 function frame_path(state::DashboardState, idx::Integer)
-    return joinpath(state.cache_dir, "frame$(lpad(idx, 8, '0')).png")
+    return joinpath(
+        state.cache_dir,
+        "frame$(lpad(idx, 8, '0'))_$(state.width)x$(state.height).png",
+    )
 end
 
 """
@@ -128,6 +158,7 @@ function render_frame!(state::DashboardState, idx::Integer)
         Base.disable_sigint() do
             Montage.tableau(
                 snap;
+                size = (state.width, state.height),
                 output = path,
                 overwrite = true,
             )
@@ -167,6 +198,11 @@ Background task that follows a running simulation.
 
 Version 1 uses polling.
 
+The loop ticks faster than playback so newly written snapshots are
+noticed promptly regardless of `fps`; advancing the frame is gated
+separately on the playback clock. Rendering that takes longer than one
+frame's budget simply means playback runs behind — it's best effort.
+
 Ctrl-C is frequently delivered to this task rather than the main one
 (it's the task doing the work), so an `InterruptException` here shuts the
 whole dashboard down instead of just ending this loop.
@@ -174,6 +210,8 @@ whole dashboard down instead of just ending this loop.
 function monitor!(state::DashboardState)
 
     try
+        next_due = time()
+
         while state.running
 
             latest = latest_snapshot_index(state.output_dir)
@@ -183,14 +221,17 @@ function monitor!(state::DashboardState)
             end
 
             if state.playing &&
-               state.current_frame < state.latest_frame
+               state.current_frame < state.latest_frame &&
+               time() ≥ next_due
 
                 next_frame = state.current_frame + 1
 
                 try_render!(state, next_frame)
+
+                next_due = time() + 1 / state.fps
             end
 
-            sleep(1.0)
+            sleep(clamp(1 / state.fps, 0.02, 0.5))
         end
     catch err
         err isa InterruptException || rethrow()
@@ -218,10 +259,41 @@ body {
 img {
     max-width: 100%;
     border: 1px solid #ccc;
+    display: block;
 }
 
-button {
-    margin-right: 5px;
+#controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+#controls button {
+    font-size: 18px;
+    line-height: 1;
+    padding: 6px 12px;
+    cursor: pointer;
+}
+
+#playpause {
+    min-width: 3.2em;
+}
+
+#settings {
+    margin: 10px 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+#settings input {
+    width: 5em;
+}
+
+.hint {
+    color: #666;
+    font-size: 12px;
 }
 </style>
 
@@ -230,61 +302,121 @@ button {
 
 <h2>PhysiCell Dashboard</h2>
 
-<div>
-<button onclick="play()">Play</button>
-<button onclick="pause()">Pause</button>
-<button onclick="prev()">Prev</button>
-<button onclick="next()">Next</button>
-<button onclick="start()">Start</button>
-<button onclick="end()">End</button>
+<div id="controls">
+<button id="first"     onclick="goFirst()"   title="First frame (Ctrl/Cmd + Left)">&#9198;</button>
+<button id="prev"      onclick="goPrev()"    title="Previous frame (Left)">&#10094;</button>
+<button id="playpause" onclick="togglePlay()" title="Play/Pause (Space)">&#9654;</button>
+<button id="next"      onclick="goNext()"    title="Next frame (Right)">&#10095;</button>
+<button id="last"      onclick="goLast()"    title="Latest frame (Ctrl/Cmd + Right)">&#9197;</button>
+
+<span style="margin-left:10px">
+Frame <span id="frame">-</span> / <span id="latest">-</span>
+</span>
 </div>
 
-<br>
+<div id="settings">
+<label>Size
+<input id="width"  type="number" min="100" max="4000" step="50">
+&times;
+<input id="height" type="number" min="100" max="4000" step="50">
+</label>
+<button onclick="applySize()">Apply</button>
 
-<div>
-Frame:
-<span id="frame">0</span>
-/
-<span id="latest">0</span>
+<label style="margin-left:14px">fps
+<input id="fps" type="number" min="0.1" max="60" step="0.5">
+</label>
+<button onclick="applyFps()">Apply</button>
+
+<span class="hint">changing size re-renders frames</span>
 </div>
-
-<br>
 
 <img id="sim" src="/current.png">
 
 <script>
 
+// Inputs are only seeded from the server once, so a refresh landing
+// mid-edit doesn't yank what's being typed out from under the cursor.
+var settingsSeeded = false;
+var fps = 2.0;
+
 async function refresh() {
 
-    let r = await fetch("/state");
-    let s = await r.json();
+    try {
+        let r = await fetch("/state");
+        let s = await r.json();
 
-    document.getElementById("frame").textContent =
-        s.current_frame;
+        document.getElementById("frame").textContent = s.current_frame;
+        document.getElementById("latest").textContent = s.latest_frame;
 
-    document.getElementById("latest").textContent =
-        s.latest_frame;
+        document.getElementById("playpause").innerHTML =
+            s.playing ? "&#9208;" : "&#9654;";
 
-    document.getElementById("sim").src =
-        "/current.png?frame=" + s.current_frame;
+        fps = s.fps;
+
+        if (!settingsSeeded) {
+            document.getElementById("width").value  = s.width;
+            document.getElementById("height").value = s.height;
+            document.getElementById("fps").value    = s.fps;
+            settingsSeeded = true;
+        }
+
+        // Size is part of the cache-buster: the frame number alone
+        // wouldn't change when only the render size does.
+        document.getElementById("sim").src =
+            "/current.png?frame=" + s.current_frame +
+            "&w=" + s.width + "&h=" + s.height;
+    } catch (e) {
+        // Server going away on shutdown is expected; stop nagging.
+    }
+
+    // Poll at roughly twice the playback rate so frames don't visibly
+    // lag behind the server, but never faster than 10x/sec.
+    setTimeout(refresh, Math.max(1000 / (2 * fps), 100));
 }
 
-async function command(name) {
-    await fetch("/" + name, {
-        method: "POST"
-    });
+async function command(path) {
+    await fetch(path, { method: "POST" });
+    refreshSoon();
 }
 
-function play()  { command("play");  }
-function pause() { command("pause"); }
+function refreshSoon() { setTimeout(refresh, 50); }
 
-function next()  { command("next"); }
-function prev()  { command("prev"); }
+function togglePlay() { command("/toggle"); }
+function goPrev()     { command("/prev");   }
+function goNext()     { command("/next");   }
+function goFirst()    { command("/start");  }
+function goLast()     { command("/end");    }
 
-function start() { command("start"); }
-function end()   { command("end"); }
+function applySize() {
+    let w = document.getElementById("width").value;
+    let h = document.getElementById("height").value;
+    command("/size?width=" + w + "&height=" + h);
+}
 
-setInterval(refresh, 1000);
+function applyFps() {
+    let v = document.getElementById("fps").value;
+    command("/fps?value=" + v);
+}
+
+document.addEventListener("keydown", function (e) {
+
+    // Don't hijack keys while a number field has focus.
+    let t = e.target.tagName;
+    if (t === "INPUT" || t === "TEXTAREA") { return; }
+
+    let mod = e.ctrlKey || e.metaKey;
+
+    if (e.code === "Space") {
+        e.preventDefault();
+        togglePlay();
+    } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        mod ? goFirst() : goPrev();
+    } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        mod ? goLast() : goNext();
+    }
+});
 
 refresh();
 
@@ -316,6 +448,9 @@ function router(state)
                 "current_frame" => state.current_frame,
                 "latest_frame" => state.latest_frame,
                 "playing" => state.playing,
+                "width" => state.width,
+                "height" => state.height,
+                "fps" => state.fps,
             ))
 
             return HTTP.Response(
@@ -351,6 +486,56 @@ function router(state)
 
             if target == "/pause"
                 state.playing = false
+                return HTTP.Response(200)
+            end
+
+            if target == "/toggle"
+                state.playing = !state.playing
+                return HTTP.Response(200)
+            end
+
+            if target == "/size"
+
+                params = HTTP.queryparams(HTTP.URI(req.target))
+
+                w = tryparse(Int, get(params, "width", ""))
+                h = tryparse(Int, get(params, "height", ""))
+
+                (w === nothing || h === nothing) &&
+                    return HTTP.Response(400, "size needs integer width and height")
+
+                lo, hi = SIZE_LIMITS
+
+                (lo ≤ w ≤ hi && lo ≤ h ≤ hi) ||
+                    return HTTP.Response(400, "size must be within $(lo)-$(hi) px")
+
+                state.width = w
+                state.height = h
+
+                # Re-render where we are so the new size is visible now
+                # rather than only on the next frame.
+                state.current_frame ≥ 0 &&
+                    try_render!(state, state.current_frame)
+
+                return HTTP.Response(200)
+            end
+
+            if target == "/fps"
+
+                params = HTTP.queryparams(HTTP.URI(req.target))
+
+                v = tryparse(Float64, get(params, "value", ""))
+
+                v === nothing &&
+                    return HTTP.Response(400, "fps needs a number")
+
+                lo, hi = FPS_LIMITS
+
+                lo ≤ v ≤ hi ||
+                    return HTTP.Response(400, "fps must be within $(lo)-$(hi)")
+
+                state.fps = v
+
                 return HTTP.Response(200)
             end
 
@@ -437,19 +622,27 @@ function open_in_browser(url::AbstractString)
 end
 
 """
-    dashboard(folder; host="127.0.0.1", port=8080, open_browser=true)
+    dashboard(folder; host="127.0.0.1", port=8080, open_browser=true,
+              width=$DEFAULT_WIDTH, height=$DEFAULT_HEIGHT, fps=$DEFAULT_FPS)
 
 Launch a live dashboard for an existing or running
 PhysiCell output folder.
+
+`width`/`height` set the rendered tableau size in pixels and `fps` the
+playback rate; all three are also adjustable from the page while the
+dashboard is running.
 """
 function dashboard(
     folder::AbstractString;
     host = "127.0.0.1",
     port = 8080,
     open_browser::Bool = true,
+    width::Integer = DEFAULT_WIDTH,
+    height::Integer = DEFAULT_HEIGHT,
+    fps::Real = DEFAULT_FPS,
 )
 
-    state = DashboardState(folder)
+    state = DashboardState(folder; width, height, fps)
 
     latest = latest_snapshot_index(folder)
 
@@ -599,6 +792,9 @@ function dashboard(
     port = 8080,
     open_browser::Bool = true,
     verbose::Bool = false,
+    width::Integer = DEFAULT_WIDTH,
+    height::Integer = DEFAULT_HEIGHT,
+    fps::Real = DEFAULT_FPS,
 )
 
     resolved_output_dir = output_dir === nothing ?
@@ -667,6 +863,9 @@ function dashboard(
             host = host,
             port = port,
             open_browser = open_browser,
+            width = width,
+            height = height,
+            fps = fps,
         )
     finally
         teardown!()
@@ -674,7 +873,8 @@ function dashboard(
 end
 
 const CLI_USAGE = """
-Usage: pc_dashboard [-o DIR] [-p PORT] [--host HOST] [--no-browser] [-v] [-- CMD...]
+Usage: pc_dashboard [-o DIR] [-p PORT] [--host HOST] [--no-browser] [-v]
+                    [--size WxH] [--fps N] [-- CMD...]
 
   -o, --output-dir DIR   PhysiCell output folder to watch. If omitted
                          and a CMD is given, this is resolved from
@@ -684,6 +884,11 @@ Usage: pc_dashboard [-o DIR] [-p PORT] [--host HOST] [--no-browser] [-v] [-- CMD
   -p, --port PORT        Port to serve the dashboard on (default: 8080)
       --host HOST        Host to bind to (default: "127.0.0.1")
       --no-browser       Don't open a browser window automatically
+      --size WxH         Rendered tableau size in pixels, e.g. 700x700
+                         (default: $(DEFAULT_WIDTH)x$(DEFAULT_HEIGHT)).
+                         Also adjustable from the page while running.
+      --fps N            Playback rate in frames per second (default:
+                         $DEFAULT_FPS). Also adjustable from the page.
   -v, --verbose          Echo the simulation's output to the console. It
                          is always captured either way, to output.log
                          (stdout) and output.err (stderr) in the output
@@ -696,10 +901,32 @@ simulation and the dashboard follows its output as it's produced.
 Otherwise the dashboard just watches an existing/running output
 folder.
 
+Keyboard shortcuts, once the page is open:
+  Space                  Play/pause
+  Left / Right           Previous / next frame
+  Ctrl or Cmd + Left     First frame
+  Ctrl or Cmd + Right    Latest frame
+
 Examples:
   pc_dashboard -o output
-  pc_dashboard -- ./project ./config/PhysiCell_settings.xml
+  pc_dashboard --size 500x500 --fps 4 -- ./project ./config/PhysiCell_settings.xml
 """
+
+"""
+    parse_size(s)
+
+Parse a `WxH` size string (e.g. `"700x700"`) into a `(width, height)`
+tuple, erroring on anything else.
+"""
+function parse_size(s::AbstractString)
+
+    m = match(r"^(\d+)[x×](\d+)$", strip(s))
+
+    isnothing(m) &&
+        error("--size expects WxH, e.g. 700x700 (got $(repr(s)))")
+
+    return parse(Int, m.captures[1]), parse(Int, m.captures[2])
+end
 
 """
     run_cli(args)
@@ -715,6 +942,9 @@ function run_cli(args::Vector{String})
     port = 8080
     open_browser = true
     verbose = false
+    width = DEFAULT_WIDTH
+    height = DEFAULT_HEIGHT
+    fps = DEFAULT_FPS
 
     sim_cmd_args = String[]
     reading_cmd = false
@@ -739,6 +969,12 @@ function run_cli(args::Vector{String})
             host = args[i]
         elseif a == "--no-browser"
             open_browser = false
+        elseif a == "--size"
+            i += 1
+            width, height = parse_size(args[i])
+        elseif a == "--fps"
+            i += 1
+            fps = parse(Float64, args[i])
         elseif a in ("-v", "--verbose")
             verbose = true
         elseif a == "--"
@@ -756,9 +992,15 @@ function run_cli(args::Vector{String})
 
     if isempty(sim_cmd_args)
         verbose && @warn "--verbose only applies to a simulation launched by pc_dashboard; ignoring it since no command was given"
-        dashboard(something(output_dir, "output"); host, port, open_browser)
+        dashboard(
+            something(output_dir, "output");
+            host, port, open_browser, width, height, fps,
+        )
     else
-        dashboard(Cmd(sim_cmd_args); output_dir, host, port, open_browser, verbose)
+        dashboard(
+            Cmd(sim_cmd_args);
+            output_dir, host, port, open_browser, verbose, width, height, fps,
+        )
     end
 
     return
