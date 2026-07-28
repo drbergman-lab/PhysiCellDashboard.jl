@@ -1,6 +1,6 @@
 name = "PhysiCellDashboard"
 uuid = "d81fb6a0-5078-47e9-a8db-0b9e17be484b"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Daniel Bergman <danielrbergman@gmail.com> and contributors"]
 
 [deps]
