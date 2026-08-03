@@ -72,7 +72,7 @@ jobs:
       # downloaded release asset wasn't tampered with after the fact via:
       #   gh attestation verify <file> --repo drbergman-lab/PhysiCellDashboard.jl
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: '${{ matrix.asset_name }}.*'
 
