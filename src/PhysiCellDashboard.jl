@@ -19,6 +19,16 @@ const DEFAULT_FPS = 2.0
 const SIZE_LIMITS = (100, 4000)
 const FPS_LIMITS = (0.1, 60.0)
 
+# Width, in pixels, reserved for every colorbar's tick labels. Each frame
+# is rendered as its own still with its own colorrange, so left to Makie
+# the reservation would track that frame's labels — about 20 px for
+# `0.65`, 55 px for `1.25×10⁻⁴` — and every axis in the grid would slide
+# over as playback crossed from one to the other. Fixing it keeps the
+# layout identical from frame to frame; 60 px fits the scientific
+# notation Makie falls back to for small concentrations at its default
+# tick font. Longer labels simply overflow into the column gap.
+const COLORBAR_TICKLABEL_SPACE = 60
+
 """
     check_size(width, height)
 
@@ -219,6 +229,7 @@ function render_frame!(state::DashboardState, idx::Integer)
             Montage.tableau(
                 snap;
                 size = (width, height),
+                colorbar_ticklabelspace = COLORBAR_TICKLABEL_SPACE,
                 output = path,
                 overwrite = true,
             )

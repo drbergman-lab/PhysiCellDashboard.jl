@@ -36,6 +36,12 @@ jobs:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
       - uses: julia-actions/cache@v3
+        with:
+          # Clone the registries fresh every run. A cached BergmanLabRegistry
+          # clone fails to fast-forward when the registry has moved on
+          # ("registry failed to rebase on origin/main"), and Pkg then resolves
+          # against the stale copy, which does not know newly registered versions.
+          cache-registries: 'false'
 
       # Montage and PhysiCellOutput are registered in the BergmanLabRegistry.
       # Add it (plus General, which must be added explicitly once any
@@ -64,6 +70,12 @@ jobs:
         with:
           version: '1'
       - uses: julia-actions/cache@v3
+        with:
+          # Clone the registries fresh every run. A cached BergmanLabRegistry
+          # clone fails to fast-forward when the registry has moved on
+          # ("registry failed to rebase on origin/main"), and Pkg then resolves
+          # against the stale copy, which does not know newly registered versions.
+          cache-registries: 'false'
 
       - name: Add BergmanLabRegistry
         run: julia -e 'import Pkg; Pkg.Registry.add("General"); Pkg.Registry.add(Pkg.RegistrySpec(url="https://github.com/drbergman-lab/BergmanLabRegistry.git"))'
